@@ -1,10 +1,13 @@
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
-import pickle
+import pandas as pd
 import numpy as np
+from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.metrics.pairwise import cosine_similarity
 
-
+# --------------------
+# App setup
+# --------------------
 app = FastAPI(title="SHL Assessment Recommendation API")
 
 # --------------------
@@ -21,46 +24,52 @@ class QueryRequest(BaseModel):
     query: str
 
 # --------------------
-# Lazy-loaded globals
+# Global objects (built once)
 # --------------------
-catalog = None
+df = None
 vectorizer = None
 embeddings = None
 
-def load_models():
-    
-    global catalog, vectorizer, embeddings
+def load_data():
+    """
+    Load CSV and build vectorizer + embeddings once.
+    This avoids pickle incompatibility issues.
+    """
+    global df, vectorizer, embeddings
 
-    if catalog is None:
-        with open("catalog.pkl", "rb") as f:
-            catalog = pickle.load(f)
+    if df is None:
+        df = pd.read_csv("data.csv")
 
-    if vectorizer is None:
-        with open("vectorizer.pkl", "rb") as f:
-            vectorizer = pickle.load(f)
+        # Safety check
+        required_cols = {"name", "url", "test_type", "description"}
+        if not required_cols.issubset(df.columns):
+            raise RuntimeError("data.csv missing required columns")
 
-    if embeddings is None:
-        with open("embeddings.pkl", "rb") as f:
-            embeddings = pickle.load(f)
+        # Combine text fields for similarity
+        df["combined_text"] = (
+            df["name"].fillna("") + " " +
+            df["test_type"].fillna("") + " " +
+            df["description"].fillna("")
+        )
+
+        vectorizer = TfidfVectorizer(stop_words="english")
+        embeddings = vectorizer.fit_transform(df["combined_text"])
 
 # --------------------
-# Recommendation endpoint (FULL FUNCTION)
+# Recommendation endpoint
 # --------------------
 @app.post("/recommend")
 def recommend(request: QueryRequest):
-    load_models()
-
     if not request.query or not request.query.strip():
         raise HTTPException(status_code=400, detail="Query cannot be empty")
+
+    load_data()
 
     # Vectorize query
     query_vec = vectorizer.transform([request.query])
 
-    # Convert embeddings to numpy array
-    emb = np.array(embeddings)
-
     # Compute similarity
-    scores = cosine_similarity(query_vec, emb)[0]
+    scores = cosine_similarity(query_vec, embeddings)[0]
 
     # Top 5 matches
     top_indices = np.argsort(scores)[::-1][:5]
@@ -68,22 +77,12 @@ def recommend(request: QueryRequest):
     results = []
 
     for idx in top_indices:
-        item = catalog[idx]
-
-        
-        if isinstance(item, dict):
-            results.append({
-                "name": item.get("name"),
-                "url": item.get("url"),
-                "test_type": item.get("test_type"),
-                "description": item.get("description")
-            })
-        else:
-            results.append({
-                "name": str(item[0]) if len(item) > 0 else None,
-                "url": str(item[1]) if len(item) > 1 else None,
-                "test_type": str(item[2]) if len(item) > 2 else None,
-                "description": str(item[3]) if len(item) > 3 else None
-            })
+        row = df.iloc[idx]
+        results.append({
+            "name": row["name"],
+            "url": row["url"],
+            "test_type": row["test_type"],
+            "description": row["description"]
+        })
 
     return {"recommended_assessments": results}
