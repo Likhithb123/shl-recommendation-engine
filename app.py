@@ -1,39 +1,34 @@
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 import pickle
 import numpy as np
 from sklearn.metrics.pairwise import cosine_similarity
 
-# -----------------------------------
-# FastAPI app
-# -----------------------------------
+
 app = FastAPI(title="SHL Assessment Recommendation API")
 
-# -----------------------------------
-# Health check (IMPORTANT for Render)
-# -----------------------------------
+# --------------------
+# Health check
+# --------------------
 @app.get("/")
 def health():
     return {"status": "ok"}
 
-# -----------------------------------
+# --------------------
 # Request schema
-# -----------------------------------
+# --------------------
 class QueryRequest(BaseModel):
     query: str
 
-# -----------------------------------
-# Lazy-loaded global objects
-# -----------------------------------
+# --------------------
+# Lazy-loaded globals
+# --------------------
 catalog = None
 vectorizer = None
 embeddings = None
 
 def load_models():
-    """
-    Load heavy files only once, when needed.
-    Prevents slow startup on Render.
-    """
+    
     global catalog, vectorizer, embeddings
 
     if catalog is None:
@@ -48,23 +43,26 @@ def load_models():
         with open("embeddings.pkl", "rb") as f:
             embeddings = pickle.load(f)
 
-# -----------------------------------
-# Recommendation endpoint
-# -----------------------------------
+# --------------------
+# Recommendation endpoint (FULL FUNCTION)
+# --------------------
 @app.post("/recommend")
 def recommend(request: QueryRequest):
     load_models()
 
+    if not request.query or not request.query.strip():
+        raise HTTPException(status_code=400, detail="Query cannot be empty")
+
     # Vectorize query
     query_vec = vectorizer.transform([request.query])
 
-    # Ensure embeddings are numpy array
+    # Convert embeddings to numpy array
     emb = np.array(embeddings)
 
-    # Compute cosine similarity
+    # Compute similarity
     scores = cosine_similarity(query_vec, emb)[0]
 
-    # Get top 5 matches
+    # Top 5 matches
     top_indices = np.argsort(scores)[::-1][:5]
 
     results = []
@@ -72,34 +70,20 @@ def recommend(request: QueryRequest):
     for idx in top_indices:
         item = catalog[idx]
 
-        # Handle different catalog formats safely
+        
         if isinstance(item, dict):
-            name = item.get("name")
-            url = item.get("url")
-            test_type = item.get("test_type")
-            description = item.get("description")
-
-        elif hasattr(item, "__dict__"):
-            name = getattr(item, "name", None)
-            url = getattr(item, "url", None)
-            test_type = getattr(item, "test_type", None)
-            description = getattr(item, "description", None)
-
+            results.append({
+                "name": item.get("name"),
+                "url": item.get("url"),
+                "test_type": item.get("test_type"),
+                "description": item.get("description")
+            })
         else:
-            # Fallback for tuple / pandas row
-            try:
-                name = item[0]
-                url = item[1]
-                test_type = item[2] if len(item) > 2 else None
-                description = item[3] if len(item) > 3 else None
-            except Exception:
-                continue
-
-        results.append({
-            "name": name,
-            "url": url,
-            "test_type": test_type,
-            "description": description
-        })
+            results.append({
+                "name": str(item[0]) if len(item) > 0 else None,
+                "url": str(item[1]) if len(item) > 1 else None,
+                "test_type": str(item[2]) if len(item) > 2 else None,
+                "description": str(item[3]) if len(item) > 3 else None
+            })
 
     return {"recommended_assessments": results}
